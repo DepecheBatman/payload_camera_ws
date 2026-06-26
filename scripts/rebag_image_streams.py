@@ -90,6 +90,7 @@ class BagProcessor:
         self.ins_msgs = []
         self.ins_times = None
         self.frames = []
+        self.rig_frames = []
         self.frames_by_timestamp = {}
         self.camera_ids = {}
         self.image_filenames = {}
@@ -431,24 +432,48 @@ class BagProcessor:
             [1, 0, 0],
             [0, 0,-1]
         ])
+        rot_enu = R_ned_enu @ rot @ R_ned_enu.T
 
         # (longitude, latitude) -> (easting, northing, zone number, zone letter)
         east, north, num, let = utm.from_latlon(ins_msg.lla[0], ins_msg.lla[1])
         altitude = ins_msg.lla[2]
 
-        # make T vector in NED
-        trans = [north, east, -altitude]
+        # make T vector in ENU
+        trans = [east, north, altitude]
 
         # compose world pose of IMX-5
+        T_ins_enu = np.eye(4)
+        T_ins_enu[:3,:3] = rot_enu
+        T_ins_enu[:3,3] = trans
+
+        # compose world pose of viewpoint
+        cam = self.camera_models[cam_name]["cam"]
+        T_cam_ins = np.array(cam["T_cam_ins"])
+        T_cam_enu = T_ins_enu @ T_cam_ins
+
         T_ins_ned = np.eye(4)
         T_ins_ned[:3,:3] = rot
-        T_ins_ned[:3,3] = trans
-
+        T_ins_ned[:3,3] = [north, east, -altitude]
         T_ned_enu = np.eye(4)
         T_ned_enu[:3,:3] = R_ned_enu
 
         timestamp = ins_msg.header.stamp.sec + ins_msg.header.stamp.nanosec * 1e-9
+        image_filename = self.get_image_filename(timestamp_str)
         camera_id = self.get_camera_id(cam_name)
+
+        pose = {
+            "w": cam["width"],
+            "h": cam["height"],
+            "fl_x": cam["K"][0,0],
+            "fl_y": cam["K"][1,1],
+            "cx": cam["K"][0,2],
+            "cy": cam["K"][1,2],
+            "timestamp": timestamp,
+            "file_path": f"images/{cam_name}/{image_filename}",
+            "transform_matrix": T_cam_enu.tolist()
+        }
+        self.frames.append(pose)
+
         ref_cam_name = next(iter(self.camera_ids))
         ref_cam = self.camera_models[ref_cam_name]["cam"]
         T_rig_enu = T_ned_enu @ T_ins_ned @ np.array(ref_cam["T_cam_ins"])
@@ -457,7 +482,7 @@ class BagProcessor:
         frame = self.frames_by_timestamp.get(timestamp_str)
         if frame is None:
             frame = {
-                "frame_id": len(self.frames) + 1,
+                "frame_id": len(self.rig_frames) + 1,
                 "rig_id": 1,
                 "timestamp": timestamp,
                 "rig_from_world_rotation": self.rotation_to_quat_wxyz(
@@ -467,7 +492,7 @@ class BagProcessor:
                 "data_ids": [],
             }
             self.frames_by_timestamp[timestamp_str] = frame
-            self.frames.append(frame)
+            self.rig_frames.append(frame)
 
         self.image_id += 1
         data_id = {
@@ -475,7 +500,7 @@ class BagProcessor:
             "sensor_id": camera_id,
             "data_id": self.image_id,
             "timestamp": timestamp,
-            "file_path": f"{cam_name}/{self.get_image_filename(timestamp_str)}",
+            "file_path": f"{cam_name}/{image_filename}",
         }
         frame["data_ids"].append(data_id)
 
@@ -503,6 +528,7 @@ class BagProcessor:
                 {
                     "rig_config": rig_config,
                     "cameras": camera_map,
+                    "rig_frames": self.rig_frames,
                     "frames": self.frames,
                 },
                 json_file,
